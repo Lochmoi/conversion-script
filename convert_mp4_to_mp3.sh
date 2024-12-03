@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the source directory and the target directory
-SOURCE_DIR="/home/lochmoi/bash/raw"
+SOURCE_DIR="/home/lochmoi/bash/test"
 TARGET_DIR="$SOURCE_DIR/converted"
 
 # Create the target directory if it doesn't exist
