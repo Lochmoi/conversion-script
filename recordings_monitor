@@ -1,0 +1,222 @@
+<?php
+$pid = getmypid();
+
+if (isset($argv[1])) {
+    $codes = [$argv[1]];
+} else {
+    $codes = ['KE', 'UG', 'CM', 'ET'];
+}
+
+if (isset($argv[2])) {
+    $media =  $argv[2];
+} else {
+    exit("Media is missing\n");
+}
+
+foreach ($codes as $code) {
+    $lock_file = "/var/log/recordings_monitor_" . $code . "_" . $media . ".lock";
+
+    if (file_exists($lock_file)) {
+        echo "\nLock file exists - $lock_file\n";
+        exit;
+    } else {
+        $createcmd = "touch $lock_file";
+        exec($createcmd);
+    }
+    $output = processData($code, $media);
+    insertUnprocessed($output);
+}
+
+function MonitorDB()
+{
+    $servername = "localhost";
+    $username = "root";
+    $password = "";
+    $dbname = "recordings_backup";
+    $conn = new mysqli($servername, $username, $password, $dbname);
+    if ($conn->connect_error) {
+        die("Connection failed: " . $conn->connect_error);
+    } else {
+        return $conn;
+    }
+}
+
+// function processData($country,$type){
+//          echo "Country: $country | Media: $type | Getting Records, Please Wait | ";
+//         $end =date("Y-m-d H:i:s");
+//        $start = date('Y-m-d H:i:s',strtotime('-1days'));
+
+//   //echo "Country: $country | Media: $type | Getting Records, Please Wait | ";
+//     //    $start = '2024-09-17 00:00:00'; // Start date for today only
+//       // $end = '2024-09-17 23:59:00'; // End date for today
+
+
+//         echo "$start -  $end | ";
+
+//         if($type == 'TV'){
+//                 $types = " 'TV','tv','Tv' ";
+//         }else{
+//                 $types = " 'Radio','RADIO','radio' ";
+//         }
+
+
+
+//         $sq = "SELECT * FROM recordings 
+//                         WHERE station_type IN ($types) AND rpp_processed = 0 
+//                         AND entrytime BETWEEN '$start' AND '$end' AND country = '$country' 
+//                         ORDER BY station_name ASC,stationdate DESC,stationtime ASC"; echo "$sq\n";
+//         $q = MonitorDB()->query($sq) or die(MonitorDB()->error);
+//         echo"Unprocessed Records: ".  $q->num_rows ."\n";
+//         $results = [];
+//         if($q->num_rows > 0){
+//                 while ($row = $q->fetch_assoc()) {
+//                         $results[] = $row;
+//                 }
+//         }
+//         return $results;
+// }
+
+
+function processData($country, $type)
+{
+    echo "Country: $country | Media: $type | Getting Records, Please Wait | ";
+    $end = date("Y-m-d H:i:s");
+    $start = date('Y-m-d H:i:s', strtotime('-1 days'));
+
+    echo "$start -  $end | ";
+
+    if ($type == 'TV') {
+        $types = " 'TV','tv','Tv' ";
+    } else {
+        $types = " 'Radio','RADIO','radio' ";
+    }
+
+
+    $excludedStations = "'ANG', 'SUL', 'MBO', 'SAH', 'MBO', 'SAH', 'SEM', 'SHE', 'SKY', 'SYO', 'VUK', 'IFT', 'ING', 'MIN', 'MUB', 'MGO', 'MTU', 'NFM', 'NOS', 'NYO', 'QWE', 'R16'";
+
+
+    $sq = "SELECT * FROM recordings 
+           WHERE station_type IN ($types) 
+           AND rpp_processed = 0 
+           AND entrytime BETWEEN '$start' AND '$end' 
+           AND country = '$country' 
+           AND station_code NOT IN ($excludedStations)
+           ORDER BY station_name ASC, stationdate DESC, stationtime ASC";
+
+    echo "$sq\n";
+    $q = MonitorDB()->query($sq) or die(MonitorDB()->error);
+    echo "Unprocessed Records: " . $q->num_rows . "\n";
+    $results = [];
+    if ($q->num_rows > 0) {
+        while ($row = $q->fetch_assoc()) {
+            $results[] = $row;
+        }
+    }
+    return $results;
+}
+
+
+
+
+function insertUnprocessed($arr)
+{
+    $check_url = 'https://s3.us-east-1.wasabisys.com/reelcloud.live/digital_recordings/';
+
+    $size = sizeof($arr);
+    $count = 0;
+    foreach ($arr as $row) {
+        $count++;
+        $id = $row['id'];
+        $filename = $row['filename'];
+        $station_id = $row['station_id'];
+        $filesize = $row['filesize'];
+        $filetype = $row['filetype'];
+        $stationdate = $row['stationdate'];
+        $stationtime = $row['stationtime'];
+        $entrytime = $row['entrytime'];
+        $station_name = $row['station_name'];
+        $station_code = $row['station_code'];
+        $station_type = $row['station_type'];
+        $country = $row['country'];
+        $fileurl = $row['fileurl'];
+        $uploaded = $row['uploaded'];
+        $moved = $row['moved'];
+        $server_id = $row['server_id'];
+        $processed = $row['processed'];
+
+        $explode = explode('_', $filename);
+        $timeExt = end($explode);
+        $ftime = explode('.', $timeExt);
+        $ftime = str_replace("-", ':', $ftime[0]);
+
+        $monyear = strtolower(date("M", strtotime($stationdate)) . date("Y", strtotime($stationdate))) . '/';
+        $dpath = str_replace('-', '_', $stationdate);
+
+        if ($stationtime !=  $ftime && strpos($stationtime, '00:00') !== false) {
+            $stationtime = $ftime;
+        }
+
+        $checkfile = $check_url . $monyear . $station_code . '/' . $dpath . '/' . $filename;
+        //echo "$checkfile\n";
+
+        echo "$count/$size | $station_name | $station_type | $filename | $filetype |  $stationdate | $stationtime | ";
+
+        if (does_url_exists($checkfile)) {
+            echo "File Available | ";
+
+            if (recordExists($filename, $stationdate)) {
+                echo "Record exists \n";
+            } else {
+                $sq = "INSERT IGNORE INTO recordings_monitor.recordings 
+                        (filename,station_id,filesize,filetype,stationdate,stationtime,station_name,station_code,country,fileurl,station_type,uploaded,moved)
+                        VALUES 
+                        ('$filename','$station_id',$filesize,'$filetype','$stationdate','$stationtime','$station_name','$station_code','$country','$fileurl','$station_type',1,1)";
+                $q = MonitorDB()->query($sq) or die("Failed to insert record.\n" . MonitorDB()->error);
+                echo "File Now Available For Analysis.\n";
+            }
+
+            $sq = "UPDATE recordings set rpp_processed = 1 WHERE id = $id";
+            $q = MonitorDB()->query($sq) or die("Failed to update record.\n" . MonitorDB()->error);
+        } else {
+            echo "File Not Available Yet | Cant Make It Visible On Rpp !!  \n";
+        }
+        echo "---\n";
+    }
+}
+
+function recordExists($filename, $stationdate)
+{
+    $sq = "SELECT id FROM recordings_monitor.recordings WHERE filename = '$filename' AND stationdate = '$stationdate' ";
+    $q = MonitorDB()->query($sq) or die("Failed to Check record.\n" . MonitorDB()->error);
+    if ($q->num_rows > 0) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+function does_url_exists($url)
+{
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_NOBODY, true);
+    curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if ($code == 200) {
+        $status = true;
+    } else {
+        $status = false;
+    }
+    curl_close($ch);
+    return $status;
+}
+
+if (!unlink($lock_file)) {
+    echo ("$lock_file cannot be deleted due to an error\n");
+} else {
+    echo ("$lock_file has been deleted\n");
+}
+
+
+$cmd = "rm -rv $lock_file";
+exec($cmd);
